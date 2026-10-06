@@ -1,0 +1,84 @@
+name: Build HuggingVoice Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build installable test APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check HuggingVoice types
+        run: pnpm --filter @workspace/clipforge run typecheck
+
+      - name: Generate the Android project
+        run: pnpm --filter @workspace/clipforge run android:prebuild
+
+      - name: Install matching Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          RN_PACKAGE_DIR="$(find node_modules/.pnpm -maxdepth 1 -type d -name 'react-native@*' -print -quit)"
+          VERSIONS_FILE="${RN_PACKAGE_DIR}/node_modules/react-native/gradle/libs.versions.toml"
+          COMPILE_SDK="$(awk -F '"' '/^compileSdk = / { print $2; exit }' "$VERSIONS_FILE")"
+          BUILD_TOOLS="$(awk -F '"' '/^buildTools = / { print $2; exit }' "$VERSIONS_FILE")"
+          NDK_VERSION="$(awk -F '"' '/^ndkVersion = / { print $2; exit }' "$VERSIONS_FILE")"
+          test -n "$COMPILE_SDK" && test -n "$BUILD_TOOLS" && test -n "$NDK_VERSION"
+          set +o pipefail
+          yes | sdkmanager --licenses
+          set -o pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${COMPILE_SDK}" \
+            "build-tools;${BUILD_TOOLS}" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;3.22.1"
+
+      - name: Build standalone test APK
+        run: ./gradlew --no-daemon assembleRelease
+        working-directory: artifacts/clipforge/android
+
+      - name: Prepare APK download
+        run: |
+          mkdir -p apk
+          cp artifacts/clipforge/android/app/build/outputs/apk/release/app-release.apk apk/HuggingVoice-test.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: huggingvoice-test-apk
+          path: apk/HuggingVoice-test.apk
+          if-no-files-found: error
+          retention-days: 14
